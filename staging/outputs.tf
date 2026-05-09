@@ -14,8 +14,8 @@ output "alb_dns_name" {
 }
 
 output "server_public_ip" {
-  description = "K3s server public IP address"
-  value       = aws_instance.k3s_server.public_ip
+  description = "K3s server public IP address (Elastic IP)"
+  value       = aws_eip.k3s_server.public_ip
 }
 
 output "server_instance_id" {

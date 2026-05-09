@@ -199,8 +199,22 @@ resource "aws_instance" "k3s_server" {
   }
 
   lifecycle {
-    ignore_changes = [ami]
+    ignore_changes = [ami, user_data]
   }
+}
+
+# Elastic IP for K3s Server (ensures stable IP for TLS certificate)
+resource "aws_eip" "k3s_server" {
+  domain   = "vpc"
+  instance = aws_instance.k3s_server.id
+
+  tags = {
+    Name        = "sockshop-${var.env}-k3s-server"
+    Project     = "sock-shop"
+    Environment = var.env
+  }
+
+  depends_on = [aws_instance.k3s_server]
 }
 
 # Application Load Balancer
