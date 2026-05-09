@@ -190,6 +190,7 @@ resource "aws_instance" "k3s_server" {
 
   user_data = base64encode(templatefile("${path.module}/user-data.sh", {
     k3s_version = var.k3s_version
+    elastic_ip  = aws_eip.k3s_server.public_ip
   }))
 
   tags = {
@@ -203,18 +204,20 @@ resource "aws_instance" "k3s_server" {
   }
 }
 
-# Elastic IP for K3s Server (ensures stable IP for TLS certificate)
+# Elastic IP allocated before the instance so its IP can be baked into the K3s TLS SAN at boot time
 resource "aws_eip" "k3s_server" {
-  domain   = "vpc"
-  instance = aws_instance.k3s_server.id
+  domain = "vpc"
 
   tags = {
     Name        = "sockshop-${var.env}-k3s-server"
     Project     = "sock-shop"
     Environment = var.env
   }
+}
 
-  depends_on = [aws_instance.k3s_server]
+resource "aws_eip_association" "k3s_server" {
+  instance_id   = aws_instance.k3s_server.id
+  allocation_id = aws_eip.k3s_server.id
 }
 
 # Application Load Balancer

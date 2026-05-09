@@ -17,18 +17,15 @@ apt-get install -y curl wget git
 # Install K3s
 echo "Installing K3s version ${k3s_version}..."
 
-# Get IPs
-PUBLIC_IP=$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4)
+# Get private IP; use the pre-allocated Elastic IP for the TLS SAN so the cert matches on first boot
 PRIVATE_IP=$(curl -s http://169.254.169.254/latest/meta-data/local-ipv4)
 
-# Install K3s with TLS SAN for Elastic IP
-# Note: We add both the current public IP and a wildcard to handle Elastic IP assignment
 curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="${k3s_version}" sh -s - \
   --write-kubeconfig-mode 644 \
   --disable traefik \
-  --node-external-ip="$PUBLIC_IP" \
+  --node-external-ip="${elastic_ip}" \
   --node-ip="$PRIVATE_IP" \
-  --tls-san="$PUBLIC_IP"
+  --tls-san="${elastic_ip}"
 
 # Wait for K3s to be ready
 echo "Waiting for K3s to be ready..."
