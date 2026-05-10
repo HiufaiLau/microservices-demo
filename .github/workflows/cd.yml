@@ -72,40 +72,41 @@ jobs:
           timeout 300 bash -c "until aws ssm describe-instance-information --filters \"Key=InstanceIds,Values=$INSTANCE_ID\" --query \"InstanceInformationList[0].PingStatus\" --output text | grep -q Online; do echo 'Waiting for SSM...'; sleep 10; done"
           echo "SSM agent is online!"
 
-      - name: Fix K3s TLS cert if needed
+      - name: Fix K3s TLS cert
         shell: bash
         run: |
           set -euo pipefail
           cd staging
           SERVER_IP=$(terraform output -raw server_public_ip)
 
-          SCRIPT=$(cat <<'BASH'
-          ELASTIC_IP="__ELASTIC_IP__"
-          CERT=/var/lib/rancher/k3s/server/tls/serving-kube-apiserver.crt
-          if [ -f "$CERT" ] && openssl x509 -in "$CERT" -noout -text | grep -q "IP Address:${ELASTIC_IP}"; then
-            echo "TLS cert already includes Elastic IP, skipping"
-            exit 0
-          fi
-          echo "Regenerating K3s TLS cert to include Elastic IP ${ELASTIC_IP}..."
+          # Write the fix script to a temp file so heredoc quoting is unambiguous
+          cat > /tmp/cert-fix.sh << 'SCRIPT'
+          #!/bin/bash
+          set -eu
+          ELASTIC_IP="__IP__"
+          echo "=== Regenerating K3s TLS cert for Elastic IP: $ELASTIC_IP ==="
           systemctl stop k3s
           rm -rf /var/lib/rancher/k3s/server/tls
           mkdir -p /etc/rancher/k3s
-          printf 'tls-san:\n  - %s\n' "$ELASTIC_IP" > /etc/rancher/k3s/config.yaml
+          { echo "tls-san:"; echo "  - $ELASTIC_IP"; } > /etc/rancher/k3s/config.yaml
+          echo "--- config.yaml ---"
+          cat /etc/rancher/k3s/config.yaml
           systemctl start k3s
           timeout 120 bash -c 'until kubectl get nodes 2>/dev/null; do sleep 2; done'
-          echo "K3s TLS cert updated successfully"
+          echo "--- New cert SANs ---"
+          openssl x509 -in /var/lib/rancher/k3s/server/tls/serving-kube-apiserver.crt -noout -text | grep "IP Address"
           kubectl get nodes
-          BASH
-          )
-          SCRIPT="${SCRIPT//__ELASTIC_IP__/$SERVER_IP}"
+          echo "=== Cert fix complete ==="
+          SCRIPT
+          sed -i "s/__IP__/${SERVER_IP}/g" /tmp/cert-fix.sh
 
           CMD_ID=$(aws ssm send-command \
             --instance-ids "$INSTANCE_ID" \
             --document-name "AWS-RunShellScript" \
-            --parameters "$(jq -n --arg cmd "$SCRIPT" '{"commands":[$cmd]}')" \
+            --parameters "$(jq -n --rawfile script /tmp/cert-fix.sh '{"commands":[$script]}')" \
             --query "Command.CommandId" --output text)
 
-          echo "Waiting for cert fix (Command ID: $CMD_ID)..."
+          echo "SSM Command: $CMD_ID — waiting for cert fix..."
           aws ssm wait command-executed \
             --command-id "$CMD_ID" \
             --instance-id "$INSTANCE_ID"
