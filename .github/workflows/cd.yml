@@ -79,26 +79,61 @@ jobs:
           cd staging
           SERVER_IP=$(terraform output -raw server_public_ip)
 
-          # Write the fix script to a temp file so heredoc quoting is unambiguous
+          # K3s install script stores CLI flags in k3s.service.env (as K3S_EXEC),
+          # not in k3s.service itself. Patch both files and write config.yaml so
+          # at least one mechanism adds the EIP to the cert.
           cat > /tmp/cert-fix.sh << 'SCRIPT'
           #!/bin/bash
           set -eu
-          ELASTIC_IP="__IP__"
-          echo "=== Regenerating K3s TLS cert for Elastic IP: $ELASTIC_IP ==="
+          IP="__IP__"
+
+          echo "=== Diagnosing K3s config sources ==="
+          echo "--- k3s.service.env ---"
+          cat /etc/systemd/system/k3s.service.env 2>/dev/null || echo "(not found)"
+          echo "--- k3s.service ExecStart ---"
+          grep ExecStart /etc/systemd/system/k3s.service 2>/dev/null || echo "(not found)"
+
+          echo "=== Patching k3s.service.env ==="
+          if [ -f /etc/systemd/system/k3s.service.env ]; then
+            sed -i "s|--tls-san [^ ]*|--tls-san $IP|g"           /etc/systemd/system/k3s.service.env
+            sed -i "s|--tls-san=[^ '\"]*|--tls-san=$IP|g"        /etc/systemd/system/k3s.service.env
+            sed -i "s|--node-external-ip [^ ]*|--node-external-ip $IP|g"    /etc/systemd/system/k3s.service.env
+            sed -i "s|--node-external-ip=[^ '\"]*|--node-external-ip=$IP|g" /etc/systemd/system/k3s.service.env
+            cat /etc/systemd/system/k3s.service.env
+          fi
+
+          echo "=== Patching k3s.service (in case flags live there) ==="
+          sed -i "s|--tls-san=[^ '\"]*|--tls-san=$IP|g"           /etc/systemd/system/k3s.service
+          sed -i "s|--node-external-ip=[^ '\"]*|--node-external-ip=$IP|g" /etc/systemd/system/k3s.service
+
+          echo "=== Writing /etc/rancher/k3s/config.yaml ==="
+          mkdir -p /etc/rancher/k3s
+          cat > /etc/rancher/k3s/config.yaml << EOF
+          tls-san:
+            - "$IP"
+          node-external-ip: "$IP"
+          EOF
+          cat /etc/rancher/k3s/config.yaml
+
+          systemctl daemon-reload
           systemctl stop k3s
           rm -rf /var/lib/rancher/k3s/server/tls
-          mkdir -p /etc/rancher/k3s
-          { echo "tls-san:"; echo "  - $ELASTIC_IP"; } > /etc/rancher/k3s/config.yaml
-          echo "--- config.yaml ---"
-          cat /etc/rancher/k3s/config.yaml
           systemctl start k3s
           timeout 120 bash -c 'until kubectl get nodes 2>/dev/null; do sleep 2; done'
-          echo "--- New cert SANs ---"
-          openssl x509 -in /var/lib/rancher/k3s/server/tls/serving-kube-apiserver.crt -noout -text | grep "IP Address"
+
+          echo "=== New cert SANs ==="
+          CERT=/var/lib/rancher/k3s/server/tls/serving-kube-apiserver.crt
+          openssl x509 -in "$CERT" -noout -text | grep "IP Address"
+
+          if openssl x509 -in "$CERT" -noout -text | grep -q "IP Address:$IP"; then
+            echo "SUCCESS: cert includes EIP $IP"
+          else
+            echo "FAIL: cert does NOT include EIP $IP — aborting"
+            exit 1
+          fi
           kubectl get nodes
-          echo "=== Cert fix complete ==="
           SCRIPT
-          sed -i "s/__IP__/${SERVER_IP}/g" /tmp/cert-fix.sh
+          sed -i "s|__IP__|${SERVER_IP}|g" /tmp/cert-fix.sh
 
           CMD_ID=$(aws ssm send-command \
             --instance-ids "$INSTANCE_ID" \
@@ -106,7 +141,7 @@ jobs:
             --parameters "$(jq -n --rawfile script /tmp/cert-fix.sh '{"commands":[$script]}')" \
             --query "Command.CommandId" --output text)
 
-          echo "SSM Command: $CMD_ID — waiting for cert fix..."
+          echo "SSM Command: $CMD_ID — waiting..."
           aws ssm wait command-executed \
             --command-id "$CMD_ID" \
             --instance-id "$INSTANCE_ID"
