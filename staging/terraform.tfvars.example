@@ -1,14 +1,18 @@
-key_name           = "your-keypair"
-bastion_cidr_block = "YOUR.PUBLIC.IP/32"
+# Optional: Only needed if you want SSH access for debugging
+# key_name           = "your-keypair"
+
+# Your public IP for K3s API access (get it from https://ifconfig.me)
+bastion_cidr_block = "0.0.0.0/0"
 
 env = "staging"
 
 vpc_cidr = "10.10.0.0/16"
 
+# Frankfurt region (closest to Berlin, Germany)
 azs = [
-  "eu-west-1a",
-  "eu-west-1b",
-  "eu-west-1c"
+  "eu-central-1a",
+  "eu-central-1b",
+  "eu-central-1c"
 ]
 
 public_subnets_cidrs = [
