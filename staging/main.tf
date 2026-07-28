@@ -100,6 +100,22 @@ resource "aws_security_group" "k3s_server" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
+  ingress {
+    description = "Grafana"
+    from_port   = 31300
+    to_port     = 31300
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    description = "Prometheus"
+    from_port   = 31090
+    to_port     = 31090
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
   # HTTPS
   ingress {
     description = "HTTPS"
@@ -316,11 +332,95 @@ resource "aws_lb_target_group_attachment" "app" {
   port             = 30080
 }
 
-# ALB Listener
+# Route 53 hosted zone
+data "aws_route53_zone" "main" {
+  name         = "sockshop-staging.link"
+  private_zone = false
+}
+
+# ACM Certificate
+resource "aws_acm_certificate" "app" {
+  domain_name       = "sockshop-staging.link"
+  validation_method = "DNS"
+
+  tags = {
+    Name        = "sockshop-${var.env}"
+    Project     = "sock-shop"
+    Environment = var.env
+  }
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+# DNS validation record
+resource "aws_route53_record" "cert_validation" {
+  for_each = {
+    for dvo in aws_acm_certificate.app.domain_validation_options : dvo.domain_name => {
+      name   = dvo.resource_record_name
+      type   = dvo.resource_record_type
+      record = dvo.resource_record_value
+    }
+  }
+
+  zone_id         = data.aws_route53_zone.main.zone_id
+  name            = each.value.name
+  type            = each.value.type
+  records         = [each.value.record]
+  ttl             = 60
+  allow_overwrite = true
+}
+
+# Wait for certificate to be issued
+resource "aws_acm_certificate_validation" "app" {
+  certificate_arn         = aws_acm_certificate.app.arn
+  validation_record_fqdns = [for r in aws_route53_record.cert_validation : r.fqdn]
+}
+
+# Route 53 alias record → ALB
+resource "aws_route53_record" "app" {
+  zone_id         = data.aws_route53_zone.main.zone_id
+  name            = "sockshop-staging.link"
+  type            = "A"
+  allow_overwrite = true
+
+  alias {
+    name                   = aws_lb.staging_alb.dns_name
+    zone_id                = aws_lb.staging_alb.zone_id
+    evaluate_target_health = true
+  }
+}
+
+# HTTP listener — redirect to HTTPS
 resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.staging_alb.arn
   port              = 80
   protocol          = "HTTP"
+
+  default_action {
+    type = "redirect"
+    redirect {
+      port        = "443"
+      protocol    = "HTTPS"
+      status_code = "HTTP_301"
+    }
+  }
+
+  tags = {
+    Name        = "sockshop-${var.env}-http"
+    Project     = "sock-shop"
+    Environment = var.env
+  }
+}
+
+# HTTPS listener
+resource "aws_lb_listener" "https" {
+  load_balancer_arn = aws_lb.staging_alb.arn
+  port              = 443
+  protocol          = "HTTPS"
+  ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"
+  certificate_arn   = aws_acm_certificate_validation.app.certificate_arn
 
   default_action {
     type             = "forward"
@@ -328,7 +428,35 @@ resource "aws_lb_listener" "http" {
   }
 
   tags = {
-    Name        = "sockshop-${var.env}-http"
+    Name        = "sockshop-${var.env}-https"
+    Project     = "sock-shop"
+    Environment = var.env
+  }
+}
+
+data "aws_caller_identity" "current" {}
+
+# Auto-stop when CPU < 5% for 30 minutes (idle = nobody using the app)
+resource "aws_cloudwatch_metric_alarm" "idle_stop" {
+  alarm_name          = "sockshop-${var.env}-idle-stop"
+  comparison_operator = "LessThanThreshold"
+  evaluation_periods  = 6
+  metric_name         = "CPUUtilization"
+  namespace           = "AWS/EC2"
+  period              = 300
+  statistic           = "Average"
+  threshold           = 5
+  alarm_description   = "Stop instance after 30 min of idle (CPU < 5%)"
+
+  alarm_actions = [
+    "arn:aws:swf:${var.aws_region}:${data.aws_caller_identity.current.account_id}:action/actions/AWS_EC2.InstanceId.Stop/1.0"
+  ]
+
+  dimensions = {
+    InstanceId = aws_instance.k3s_server.id
+  }
+
+  tags = {
     Project     = "sock-shop"
     Environment = var.env
   }

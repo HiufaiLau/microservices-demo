@@ -13,6 +13,11 @@ output "alb_dns_name" {
   value       = aws_lb.staging_alb.dns_name
 }
 
+output "app_url" {
+  description = "Application URL"
+  value       = "https://sockshop-staging.link"
+}
+
 output "server_public_ip" {
   description = "K3s server public IP address (Elastic IP)"
   value       = aws_eip.k3s_server.public_ip
